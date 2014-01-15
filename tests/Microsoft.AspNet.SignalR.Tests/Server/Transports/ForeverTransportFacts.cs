@@ -351,6 +351,66 @@ namespace Microsoft.AspNet.SignalR.Tests.Server.Transports
             EnqueAsyncWriteAndEndRequest(writeFaulted);
         }
 
+
+        [Fact]
+        public void RequestCompletesAfterThrowingFuncInTaskQueue()
+        {
+            // Arrange
+            var response = new Mock<IResponse>();
+            response.Setup(m => m.CancellationToken).Returns(CancellationToken.None);
+            var request = new Mock<IRequest>();
+            var qs = new NameValueCollection();
+            qs["connectionId"] = "1";
+            request.Setup(m => m.QueryString).Returns(new NameValueCollectionWrapper(qs));
+            request.Setup(m => m.LocalPath).Returns("/test/echo/connect");
+            var counters = new Mock<IPerformanceCounterManager>();
+            var heartBeat = new Mock<ITransportHeartbeat>();
+            var json = new JsonSerializer();
+            var hostContext = new HostContext(request.Object, response.Object);
+            var transportConnection = new Mock<ITransportConnection>();
+            var traceManager = new Mock<ITraceManager>();
+            counters.SetupGet(m => m.ConnectionsConnected).Returns(new NoOpPerformanceCounter());
+            counters.SetupGet(m => m.ErrorsTransportTotal).Returns(new NoOpPerformanceCounter());
+            counters.SetupGet(m => m.ErrorsTransportPerSec).Returns(new NoOpPerformanceCounter());
+            counters.SetupGet(m => m.ErrorsAllTotal).Returns(new NoOpPerformanceCounter());
+            counters.SetupGet(m => m.ErrorsAllPerSec).Returns(new NoOpPerformanceCounter());
+            traceManager.Setup(m => m[It.IsAny<string>()]).Returns(new System.Diagnostics.TraceSource("foo"));
+
+            transportConnection.Setup(m => m.Receive(It.IsAny<string>(),
+                                                     It.IsAny<Func<PersistentResponse, object, Task<bool>>>(),
+                                                     It.IsAny<int>(),
+                                                     It.IsAny<object>()))
+                .Returns<string, Func<PersistentResponse, object, Task<bool>>, int, object>(
+                    (messageId, callback, maxMessages, state) =>
+                        new DisposableAction(() => callback(new PersistentResponse(), state))
+                    );
+            transportConnection.Setup(m => m.Send(It.IsAny<ConnectionMessage>())).Returns(TaskAsyncHelper.Empty);
+
+            var transport = new Mock<ForeverTransport>(hostContext, json, heartBeat.Object, counters.Object, traceManager.Object)
+            {
+                CallBase = true
+            };
+
+            var tcs = new TaskCompletionSource<bool>();
+            transport.Object.AfterRequestEnd = (ex) =>
+            {
+                // Trip the cancellation token
+                tcs.TrySetResult(transport.Object.WriteQueue.IsDrained);
+            };
+
+            // Act
+            transport.Object.ProcessRequest(transportConnection.Object);
+
+            transport.Object.EnqueueOperation(() =>
+            {
+                throw new Exception();
+            });
+
+            // Assert
+            Assert.True(tcs.Task.Wait(TimeSpan.FromSeconds(2)));
+            Assert.True(tcs.Task.Result);
+        }
+
         [Fact]
         public void InitializeResponseIsFirstEnqueuedOperation()
         {

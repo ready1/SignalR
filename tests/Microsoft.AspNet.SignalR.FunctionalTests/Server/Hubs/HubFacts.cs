@@ -2223,6 +2223,38 @@ namespace Microsoft.AspNet.SignalR.Tests
             }
         }
 
+        [Fact]
+        public async Task ReturningUnserializableObjectsForcesImmediateReconnectWithWebSockets()
+        {
+            using (var host = CreateHost(HostType.IISExpress, TransportType.Websockets))
+            {
+                host.Initialize();
+
+                using (var connection = CreateHubConnection(host))
+                {
+                    var keepAlivesMissed = false;
+                    var reconnectedWh = new ManualResetEventSlim();
+
+                    connection.ConnectionSlow += () =>
+                    {
+                        keepAlivesMissed = true;
+                    };
+
+                    connection.Reconnected += reconnectedWh.Set;
+
+                    var hub = connection.CreateHubProxy("returnsUnserializableObjectHub");
+
+                    await connection.Start(host.Transport);
+
+                    // The return value of GetStuff will cause Json.NET to throw during serialization
+                    Assert.Throws<AggregateException>(() => hub.Invoke("GetStuff").Wait());
+
+                    Assert.True(reconnectedWh.Wait(TimeSpan.FromSeconds(30)));
+                    Assert.False(keepAlivesMissed);
+                }
+            }
+        }
+
         public class SendToSome : Hub
         {
             public Task SendToUser(string userId)
@@ -2335,6 +2367,16 @@ namespace Microsoft.AspNet.SignalR.Tests
                         Groups.Remove(Context.ConnectionId, user.Name + "2").Wait();
                         Groups.Add(Context.ConnectionId, user.Name + "2").Wait();
                     });
+            }
+        }
+
+        public class ReturnsUnserializableObjectHub : Hub
+        {
+            public IEnumerable<int> GetStuff()
+            {
+                yield return 1;
+                yield return 2;
+                throw new Exception("This is will bork the socket :P");
             }
         }
 
