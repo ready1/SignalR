@@ -17,6 +17,8 @@ namespace Microsoft.AspNet.SignalR.Infrastructure
         private volatile bool _drained;
         private readonly int? _maxSize;
         private long _size;
+        private Action<Exception, object> _onError = (ex, state) => { };
+        private object _onErrorState;
 
         public TaskQueue()
             : this(TaskAsyncHelper.Empty)
@@ -82,24 +84,32 @@ namespace Microsoft.AspNet.SignalR.Infrastructure
 
                 Task newTask = _lastQueuedTask.Then((next, nextState) =>
                 {
-                    return next(nextState).Finally(s =>
+                    try
                     {
-                        var queue = (TaskQueue)s;
-                        if (queue._maxSize != null)
+                        return next(nextState).Finally(s =>
                         {
-                            // Decrement the number of items left in the queue
-                            Interlocked.Decrement(ref queue._size);
+                            var queue = (TaskQueue)s;
+                            if (queue._maxSize != null)
+                            {
+                                // Decrement the number of items left in the queue
+                                Interlocked.Decrement(ref queue._size);
 
 #if !CLIENT_NET45 && !CLIENT_NET4 && !PORTABLE && !NETFX_CORE
-                            var counter = QueueSizeCounter;
-                            if (counter != null)
-                            {
-                                counter.Decrement();
-                            }
+                                var counter = QueueSizeCounter;
+                                if (counter != null)
+                                {
+                                    counter.Decrement();
+                                }
 #endif
-                        }
-                    },
-                    this);
+                            }
+                        },
+                        this);
+                    }
+                    catch (Exception ex)
+                    {
+                        _onError(ex, _onErrorState);
+                        throw;
+                    }
                 },
                 taskFunc, state);
 
@@ -123,6 +133,14 @@ namespace Microsoft.AspNet.SignalR.Infrastructure
 
                 return _lastQueuedTask;
             }
+        }
+
+        // Only one error handler can be attached at a given time
+        public void Error(Action<Exception, object> errorHandler, object state)
+        {
+            // REVIEW: Should I guard this to ensure it isn't called more than once?
+            _onErrorState = state;
+            _onError = errorHandler;
         }
     }
 }

@@ -91,6 +91,9 @@ namespace Microsoft.AspNet.SignalR.Transports
             // PersistentConnection.OnConnected must complete before we can write to the output stream,
             // so clients don't indicate the connection has started too early.
             InitializeTcs = new TaskCompletionSource<object>();
+
+            // WriteQueue must be reinitialized before calling base.InitializePersistentState to ensure
+            // _requestLifeTime is properly initialized.
             WriteQueue = new TaskQueue(InitializeTcs.Task);
 
             base.InitializePersistentState();
@@ -229,6 +232,11 @@ namespace Microsoft.AspNet.SignalR.Transports
             var lifetime = new RequestLifetime(this, _requestLifeTime);
             var messageContext = new MessageContext(this, lifetime, registration);
 
+            // Now that we have a MessageContext, we can attach OnError to the WriteQueue.
+            // The WriteQueue will trigger the error handler when a queued Func throws synchronously,
+            // e.g. JSON serialization failure.
+            WriteQueue.Error(OnError, messageContext);
+
             if (BeforeReceive != null)
             {
                 BeforeReceive();
@@ -348,7 +356,7 @@ namespace Microsoft.AspNet.SignalR.Transports
             return TaskAsyncHelper.Empty;
         }
 
-        private static void OnError(AggregateException ex, object state)
+        private static void OnError(Exception ex, object state)
         {
             var context = (MessageContext)state;
 
